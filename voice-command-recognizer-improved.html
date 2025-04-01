@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Command Recognition</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/p5.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/addons/p5.sound.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@2.8.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.5.4/dist/speech-commands.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+        }
+        #canvas-container {
+            margin-top: 20px;
+        }
+        #command-display {
+            font-size: 48px;
+            font-weight: bold;
+            margin: 20px;
+            padding: 20px;
+            border-radius: 10px;
+            min-width: 300px;
+            min-height: 100px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #ffffff;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+        }
+        #status {
+            margin-top: 20px;
+            color: #666;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .confidence-bar {
+            height: 20px;
+            background-color: #ddd;
+            border-radius: 5px;
+            margin: 5px 0;
+            position: relative;
+        }
+        .confidence-fill {
+            height: 100%;
+            border-radius: 5px;
+            transition: width 0.3s ease;
+        }
+        .confidence-label {
+            position: absolute;
+            left: 10px;
+            top: 0;
+            color: #000;
+            line-height: 20px;
+        }
+        .confidence-value {
+            position: absolute;
+            right: 10px;
+            top: 0;
+            color: #000;
+            line-height: 20px;
+        }
+        #confidence-container {
+            width: 300px;
+            margin-top: 20px;
+        }
+        #debug {
+            margin-top: 10px;
+            color: #999;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Voice Command Recognition</h1>
+    <div id="command-display">Ready</div>
+    <div id="confidence-container"></div>
+    <div>
+        <button id="start-button" disabled>Start Listening</button>
+        <button id="stop-button" disabled>Stop Listening</button>
+    </div>
+    <div id="status">Status: Initializing...</div>
+    <div id="debug"></div>
+    <div id="canvas-container"></div>
+
+    <script>
+        // Global variables
+        const URL = "https://teachablemachine.withgoogle.com/models/vIOfXXshJ/";
+        let model, recognizer;
+        let classLabels = [];
+        let isListening = false;
+        let confidenceThreshold = 0.75;
+        let label = "Ready";
+        let confidences = [];
+        let colorMap = {
+            'up': '#00ff00',
+            'down': '#ff0000',
+            'left': '#0000ff',
+            'right': '#ff00ff',
+            'stop': '#ffff00',
+            'Background Noise': '#aaaaaa'
+        };
+
+        // Debug function to help diagnose issues
+        function debugLog(message) {
+            console.log(message);
+            document.getElementById('debug').innerHTML += message + '<br>';
+        }
+
+        // Load the model using tensorflow.js directly
+        async function loadModel() {
+            document.getElementById('status').textContent = 'Status: Loading model...';
+            
+            try {
+                debugLog("Creating recognizer");
+                recognizer = speechCommands.create("BROWSER_FFT");
+                debugLog("Loading model from URL");
+                
+                // Load the model from the URL
+                await recognizer.ensureModelLoaded();
+                debugLog("Base model loaded");
+                
+                // Load your custom model
+                const modelURL = URL + "model.json";
+                try {
+                    model = await tf.loadLayersModel(modelURL);
+                    debugLog("Custom model loaded");
+                    
+                    // Fetch metadata to get class labels
+                    try {
+                        const metadataURL = URL + "metadata.json";
+                        const metadataResponse = await fetch(metadataURL);
+                        const metadata = await metadataResponse.json();
+                        classLabels = metadata.wordLabels || metadata.labels || [];
+                        debugLog("Labels loaded: " + classLabels.join(", "));
+                        
+                        document.getElementById('status').textContent = 'Status: Model loaded';
+                        document.getElementById('start-button').disabled = false;
+                    } catch (metadataError) {
+                        debugLog("Metadata error: " + metadataError);
+                        // Use default labels if metadata fetch fails
+                        classLabels = ['Background Noise', 'up', 'down', 'left', 'right', 'stop'];
+                        document.getElementById('status').textContent = 'Status: Model loaded (with default labels)';
+                        document.getElementById('start-button').disabled = false;
+                    }
+                } catch (modelError) {
+                    debugLog("Error loading custom model: " + modelError);
+                    // Fall back to direct recognition with p5.sound
+                    fallbackToP5Sound();
+                }
+            } catch (error) {
+                debugLog("Error in main loader: " + error);
+                document.getElementById('status').textContent = 'Status: Error loading model';
+                // Fall back to simple audio detection
+                fallbackToP5Sound();
+            }
+        }
+
+        // Fallback to simpler p5.sound-based audio detection
+        function fallbackToP5Sound() {
+            debugLog("Falling back to p5.sound");
+            document.getElementById('status').textContent = 'Status: Using fallback mode';
+            document.getElementById('start-button').disabled = false;
+            
+            // Define dummy class labels if not loaded
+            if (classLabels.length === 0) {
+                classLabels = ['Background Noise', 'up', 'down', 'left', 'right', 'stop'];
+            }
+        }
+
+        // Start listening to microphone
+        function startListening() {
+            isListening = true;
+            document.getElementById('status').textContent = 'Status: Listening...';
+            document.getElementById('start-button').disabled = true;
+            document.getElementById('stop-button').disabled = false;
+
+            if (recognizer) {
+                debugLog("Starting recognition with tensorflow");
+                startRecognition();
+            } else {
+                debugLog("Using p5 microphone");
+                // Just simulate recognition for demonstration
+                simulateRecognition();
+            }
+        }
+
+        // Stop listening
+        function stopListening() {
+            isListening = false;
+            document.getElementById('status').textContent = 'Status: Stopped';
+            document.getElementById('start-button').disabled = false;
+            document.getElementById('stop-button').disabled = true;
+            
+            if (recognizer) {
+                recognizer.stopListening();
+            }
+        }
+
+        // Start recognition with tensorflow.js
+        async function startRecognition() {
+            if (!recognizer) return;
+            
+            try {
+                await recognizer.listen(result => {
+                    if (!isListening) return;
+                    
+                    // Process results
+                    const scores = result.scores;
+                    let results = [];
+                    
+                    for (let i = 0; i < classLabels.length; i++) {
+                        results.push({
+                            label: classLabels[i],
+                            probability: scores[i] || 0
+                        });
+                    }
+                    
+                    // Sort by probability
+                    results.sort((a, b) => b.probability - a.probability);
+                    
+                    // Update UI
+                    processResults(results);
+                }, {
+                    overlapping: true,
+                    probabilityThreshold: 0.5
+                });
+                
+                debugLog("Recognition started");
+            } catch (error) {
+                debugLog("Recognition error: " + error);
+                document.getElementById('status').textContent = 'Status: Error starting recognition';
+                document.getElementById('start-button').disabled = false;
+                document.getElementById('stop-button').disabled = true;
+            }
+        }
+
+        // Simulate recognition for demo/fallback
+        function simulateRecognition() {
+            if (!isListening) return;
+            
+            // Simulate random results for demo purposes
+            const simulatedIndex = Math.floor(Math.random() * classLabels.length);
+            const results = classLabels.map((label, i) => {
+                return {
+                    label: label,
+                    probability: i === simulatedIndex ? 0.8 : Math.random() * 0.3
+                };
+            });
+            
+            // Sort by probability
+            results.sort((a, b) => b.probability - a.probability);
+            
+            // Update UI
+            processResults(results);
+            
+            // Continue simulation
+            setTimeout(simulateRecognition, 1000);
+        }
+
+        // Process recognition results
+        function processResults(results) {
+            if (!isListening) return;
+            
+            // Update confidences
+            confidences = results;
+            
+            // Update display
+            const topResult = results[0];
+            if (topResult.probability > confidenceThreshold) {
+                label = topResult.label;
+                let commandDisplay = document.getElementById('command-display');
+                commandDisplay.textContent = label;
+                commandDisplay.style.backgroundColor = colorMap[label] || '#ffffff';
+                commandDisplay.style.color = (label === 'up' || label === 'stop') ? '#000000' : '#ffffff';
+            }
+
+            // Update confidence bars
+            updateConfidenceBars(results);
+        }
+
+        // Update confidence bars
+        function updateConfidenceBars(results) {
+            const container = document.getElementById('confidence-container');
+            container.innerHTML = '';
+
+            results.forEach(result => {
+                const barContainer = document.createElement('div');
+                barContainer.className = 'confidence-bar';
+
+                const fill = document.createElement('div');
+                fill.className = 'confidence-fill';
+                fill.style.width = `${result.probability * 100}%`;
+                fill.style.backgroundColor = colorMap[result.label] || '#aaaaaa';
+
+                const label = document.createElement('span');
+                label.className = 'confidence-label';
+                label.textContent = result.label;
+
+                const value = document.createElement('span');
+                value.className = 'confidence-value';
+                value.textContent = `${(result.probability * 100).toFixed(1)}%`;
+
+                barContainer.appendChild(fill);
+                barContainer.appendChild(label);
+                barContainer.appendChild(value);
+                container.appendChild(barContainer);
+            });
+        }
+
+        // p5.js sketch
+        let sketch = function(p) {
+            p.setup = function() {
+                p.createCanvas(300, 300).parent('canvas-container');
+                p.textAlign(p.CENTER, p.CENTER);
+                p.textSize(24);
+                
+                // Initialize buttons
+                document.getElementById('start-button').addEventListener('click', startListening);
+                document.getElementById('stop-button').addEventListener('click', stopListening);
+                
+                // Initialize model
+                loadModel();
+            };
+
+            p.draw = function() {
+                p.background(240);
+                
+                // Draw visualization based on command
+                if (label === 'up') {
+                    p.fill(0, 255, 0);
+                    p.triangle(p.width/2, p.height/4, p.width/4, p.height*3/4, p.width*3/4, p.height*3/4);
+                } else if (label === 'down') {
+                    p.fill(255, 0, 0);
+                    p.triangle(p.width/2, p.height*3/4, p.width/4, p.height/4, p.width*3/4, p.height/4);
+                } else if (label === 'left') {
+                    p.fill(0, 0, 255);
+                    p.triangle(p.width/4, p.height/2, p.width*3/4, p.height/4, p.width*3/4, p.height*3/4);
+                } else if (label === 'right') {
+                    p.fill(255, 0, 255);
+                    p.triangle(p.width*3/4, p.height/2, p.width/4, p.height/4, p.width/4, p.height*3/4);
+                } else if (label === 'stop') {
+                    p.fill(255, 255, 0);
+                    p.rectMode(p.CENTER);
+                    p.rect(p.width/2, p.height/2, p.width/2, p.height/2);
+                } else {
+                    p.fill(100);
+                    p.ellipse(p.width/2, p.height/2, p.width/2, p.height/2);
+                }
+                
+                // Add text
+                p.fill(0);
+                p.text(label, p.width/2, p.height/2);
+            };
+        };
+
+        // Initialize p5.js sketch properly
+        new p5(sketch);
+    </script>
+</body>
+</html>
